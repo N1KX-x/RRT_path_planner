@@ -28,6 +28,15 @@ from .config import (
     GRID_RESOLUTION,
     OBSTACLE_INFLATION_RADIUS,
     FRONT_OBSTACLE_STOP_DISTANCE,
+    FRONT_HARD_STOP_ANGLE_DEG,
+    RECOVERY_FORWARD_SPEED_TRIGGER,
+    RECOVERY_TURN_TOWARD_ANGULAR_TRIGGER,
+    SIDE_CLEARANCE_TRIGGER_DISTANCE,
+    SIDE_CLEARANCE_ACTIVATION_ANGLE,
+    SIDE_CLEARANCE_MIN_FORWARD_SPEED,
+    SIDE_CLEARANCE_MAX_ANGULAR_SPEED,
+    SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE,
+    K_ANGULAR,
     PATH_REPLAN_COOLDOWN_SCANS,
     PATH_REPLAN_LOOKAHEAD_DISTANCE,
     REPLAN_STRAIGHT_SPEED,
@@ -95,6 +104,7 @@ class InformedRRTNavigator(Node):
         self.recovery_counter = 0
         self.recovery_trail = []
         self.recovery_trail_index = 0
+        self.normal_motion_ticks_since_recovery = 0
 
         self.backup_ticks = RECOVERY_BACKUP_TICKS
         self.backup_speed = RECOVERY_BACKUP_SPEED
@@ -251,10 +261,6 @@ class InformedRRTNavigator(Node):
             robot_theta=self.robot_theta
         )
 
-        if self.obstacle_too_close(msg):
-            self.enter_recovery()
-            return
-
         if (
             not self.recovery_mode
             and not self.need_replan
@@ -283,11 +289,6 @@ class InformedRRTNavigator(Node):
             self.run_recovery()
             return
 
-        if self.latest_scan is not None and self.obstacle_too_close(self.latest_scan):
-            self.enter_recovery()
-            self.run_recovery()
-            return
-
         distance_to_goal = self.distance_to_active_goal()
 
         if distance_to_goal < GOAL_TOLERANCE:
@@ -302,7 +303,9 @@ class InformedRRTNavigator(Node):
                 return
 
             if self.replan_straight_mode:
-                self.publish_replan_straight_cmd()
+                if not self.publish_replan_straight_cmd():
+                    self.run_recovery()
+                    return
 
             success = self.plan_path()
 
@@ -355,11 +358,27 @@ class InformedRRTNavigator(Node):
             self.path_index += 1
             return
 
-        if self.latest_scan is not None and self.obstacle_too_close(self.latest_scan):
+        if self.latest_scan is not None and self.should_do_smooth_side_turn(
+            self.latest_scan,
+            target[0],
+            target[1]
+        ):
+            cmd = self.compute_smooth_side_turn_cmd(
+                self.latest_scan,
+                target[0],
+                target[1],
+                cmd
+            )
+
+        if self.latest_scan is not None and self.command_needs_recovery(
+            self.latest_scan,
+            cmd
+        ):
             self.enter_recovery()
             return
 
         self.cmd_pub.publish(cmd)
+        self.record_normal_motion_tick(cmd)
 
     def enter_recovery(self):
         """Start recovery mode after the front LiDAR sector becomes unsafe."""
@@ -368,6 +387,10 @@ class InformedRRTNavigator(Node):
 
         self.recovery_mode = True
         self.recovery_counter = 0
+        self.backup_ticks = min(
+            RECOVERY_BACKUP_TICKS,
+            self.normal_motion_ticks_since_recovery
+        )
         self.need_replan = True
         self.replan_straight_mode = False
         self.recovery_trail = list(self.robot_trail)
@@ -386,6 +409,11 @@ class InformedRRTNavigator(Node):
     def run_recovery(self):
         """Follow the previous robot trail backward, then allow the planner to replan."""
         cmd = Twist()
+
+        if self.recovery_counter >= self.backup_ticks:
+            self.get_logger().info("Recovery backup finished. Replanning.")
+            self.finish_recovery()
+            return
 
         if self.latest_scan is None or not self.rear_is_clear(self.latest_scan):
             self.get_logger().warn("Recovery: rear blocked. Stopping and replanning.")
@@ -450,6 +478,7 @@ class InformedRRTNavigator(Node):
         self.recovery_counter = 0
         self.recovery_trail = []
         self.recovery_trail_index = 0
+        self.normal_motion_ticks_since_recovery = 0
         self.path = []
         self.path_index = 0
         self.need_replan = True
@@ -575,7 +604,22 @@ class InformedRRTNavigator(Node):
         cmd = Twist()
         cmd.linear.x = REPLAN_STRAIGHT_SPEED
         cmd.angular.z = 0.0
+
+        if self.latest_scan is not None and self.command_needs_recovery(
+            self.latest_scan,
+            cmd
+        ):
+            self.enter_recovery()
+            return False
+
         self.cmd_pub.publish(cmd)
+        self.record_normal_motion_tick(cmd)
+        return True
+
+    def record_normal_motion_tick(self, cmd):
+        """Count non-recovery movement commands for recovery backup duration."""
+        if abs(cmd.linear.x) > 1e-6 or abs(cmd.angular.z) > 1e-6:
+            self.normal_motion_ticks_since_recovery += 1
 
     def clear_cell_radius(self, center_cell, radius_cells=3):
         """Clear a small circle in the grid so the robot can plan from its own cell."""
@@ -742,6 +786,132 @@ class InformedRRTNavigator(Node):
             return 999.0
 
         return min(values)
+
+    def get_side_clearance_info(self, scan_msg):
+        """Return the nearest left and right distances, plus the closer side name."""
+        left_min = self.get_sector_min(
+            scan_msg,
+            90.0 - SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE,
+            90.0 + SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE
+        )
+        right_min = self.get_sector_min(
+            scan_msg,
+            -90.0 - SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE,
+            -90.0 + SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE
+        )
+
+        if left_min <= right_min:
+            return left_min, right_min, "left"
+
+        return left_min, right_min, "right"
+
+    def should_do_smooth_side_turn(self, scan_msg, target_x, target_y):
+        """Return True when a side obstacle is close and the robot is actively turning."""
+        left_min, right_min, close_side = self.get_side_clearance_info(scan_msg)
+        side_min = left_min if close_side == "left" else right_min
+
+        if side_min > SIDE_CLEARANCE_TRIGGER_DISTANCE:
+            return False
+
+        dx = target_x - self.robot_x
+        dy = target_y - self.robot_y
+        target_angle = math.atan2(dy, dx)
+        angle_error = normalize_angle(target_angle - self.robot_theta)
+
+        return abs(angle_error) > SIDE_CLEARANCE_ACTIVATION_ANGLE
+
+    def compute_smooth_side_turn_cmd(self, scan_msg, target_x, target_y, base_cmd):
+        """Return a low-speed forward arc command for safe side-wall turning."""
+        cmd = Twist()
+        dx = target_x - self.robot_x
+        dy = target_y - self.robot_y
+        target_angle = math.atan2(dy, dx)
+        angle_error = normalize_angle(target_angle - self.robot_theta)
+
+        cmd.linear.x = SIDE_CLEARANCE_MIN_FORWARD_SPEED
+        cmd.angular.z = clamp(
+            K_ANGULAR * angle_error,
+            -SIDE_CLEARANCE_MAX_ANGULAR_SPEED,
+            SIDE_CLEARANCE_MAX_ANGULAR_SPEED
+        )
+
+        return cmd
+
+    def get_sector_min_with_angle(self, scan_msg, start_deg, end_deg):
+        """Return nearest valid LiDAR reading and its angle inside an angle range."""
+        best_range = 999.0
+        best_angle = 0.0
+
+        start_rad = math.radians(start_deg)
+        end_rad = math.radians(end_deg)
+
+        angle = scan_msg.angle_min
+
+        for raw_r in scan_msg.ranges:
+            normalized_angle = math.atan2(math.sin(angle), math.cos(angle))
+
+            in_sector = False
+
+            if start_rad <= end_rad:
+                if start_rad <= normalized_angle <= end_rad:
+                    in_sector = True
+            else:
+                if normalized_angle >= start_rad or normalized_angle <= end_rad:
+                    in_sector = True
+
+            if in_sector:
+                if not math.isinf(raw_r) and not math.isnan(raw_r):
+                    r = lidar_range_to_meters(raw_r)
+
+                    if 0.0 < r < best_range:
+                        best_range = r
+                        best_angle = normalized_angle
+
+            angle += scan_msg.angle_increment
+
+        return best_range, best_angle
+
+    def command_needs_recovery(self, scan_msg, cmd):
+        """Return True when the current command would move toward a close obstacle."""
+        hard_front_min = self.get_sector_min(
+            scan_msg,
+            -FRONT_HARD_STOP_ANGLE_DEG,
+            FRONT_HARD_STOP_ANGLE_DEG
+        )
+
+        if hard_front_min < FRONT_OBSTACLE_STOP_DISTANCE:
+            self.get_logger().warn(
+                f"Obstacle too close straight ahead: {hard_front_min:.2f} m"
+            )
+            return True
+
+        wide_front_min, wide_front_angle = self.get_sector_min_with_angle(
+            scan_msg,
+            -math.degrees(FRONT_DETECTION_ANGLE),
+            math.degrees(FRONT_DETECTION_ANGLE)
+        )
+
+        if wide_front_min >= FRONT_OBSTACLE_STOP_DISTANCE:
+            return False
+
+        if cmd.linear.x > RECOVERY_FORWARD_SPEED_TRIGGER:
+            self.get_logger().warn(
+                f"Obstacle too close while moving forward: {wide_front_min:.2f} m"
+            )
+            return True
+
+        turning_toward_obstacle = (
+            abs(cmd.angular.z) > RECOVERY_TURN_TOWARD_ANGULAR_TRIGGER
+            and cmd.angular.z * wide_front_angle > 0.0
+        )
+
+        if turning_toward_obstacle:
+            self.get_logger().warn(
+                f"Obstacle too close while turning toward it: {wide_front_min:.2f} m"
+            )
+            return True
+
+        return False
 
     def obstacle_too_close(self, scan_msg):
         """Check whether the front sector has an obstacle inside the stop distance."""

@@ -47,6 +47,23 @@ MAX_LIDAR_OBSTACLE_RANGE = 3.0
 # If an obstacle is closer than this in front, the robot enters recovery.
 FRONT_OBSTACLE_STOP_DISTANCE = 0.22
 
+# Narrow straight-ahead danger zone. Obstacles here are treated as true front
+# blockers even if the wider front cone also includes side-wall readings.
+FRONT_HARD_STOP_ANGLE_DEG = 15.0
+
+# Recovery is allowed to ignore a wide-front obstacle when the command is only
+# creeping/turning away from it. Faster forward motion still triggers recovery.
+RECOVERY_FORWARD_SPEED_TRIGGER = 0.03
+RECOVERY_TURN_TOWARD_ANGULAR_TRIGGER = 0.05
+
+# Side clearance threshold for smooth turning near parallel walls.
+SIDE_CLEARANCE_TRIGGER_DISTANCE = 0.265
+SIDE_CLEARANCE_ACTIVATION_ANGLE = 0.10
+SIDE_CLEARANCE_MIN_FORWARD_SPEED = 0.02
+SIDE_CLEARANCE_MAX_LINEAR_SPEED = 0.04
+SIDE_CLEARANCE_MAX_ANGULAR_SPEED = 0.22
+SIDE_CLEARANCE_SIDE_SECTOR_HALF_ANGLE = 50.0
+
 # If the current path becomes blocked within this distance, replan before recovery.
 PATH_REPLAN_LOOKAHEAD_DISTANCE = 4.0
 
