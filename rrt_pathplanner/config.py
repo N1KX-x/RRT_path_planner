@@ -76,10 +76,10 @@ REPLAN_STRAIGHT_SPEED = 0.08
 
 # Half-angle of the front danger zone, in radians.
 # 0.785 rad is 45 degrees on each side, 90 degrees total.
-FRONT_DETECTION_ANGLE = 0.685
+FRONT_DETECTION_ANGLE = 0.785
 
 # Do not back up during recovery if the rear sector is closer than this.
-RECOVERY_REAR_CLEAR_DISTANCE = 0.03
+RECOVERY_REAR_CLEAR_DISTANCE = 0.1
 
 # Recovery follows the robot's recent trail backward instead of turning in place.
 # Negative speed means backing up.
