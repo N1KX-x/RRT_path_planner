@@ -36,6 +36,108 @@ EMERGENCY_STOP
 Each robot waits for the central coordinator before moving. After you type `Y`
 in the central terminal, the robots start navigating to their own goals.
 
+## Gazebo Two-Robot Test
+
+Do not use the stock `turtlebot3_gazebo multi_robot.launch.py` if it fails with
+permission denied in `/opt/ros/humble`. This package includes a two-Waffle launch
+file that writes temporary SDF files to `/tmp` instead.
+
+Build first:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws
+colcon build --packages-select rrt_pathplanner
+source install/setup.bash
+```
+
+Terminal 1, start Gazebo with two namespaced Waffle robots:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+
+ros2 launch rrt_pathplanner two_waffles.launch.py
+```
+
+Check the simulated robot topics:
+
+```bash
+ros2 topic list | grep TB3
+```
+
+You should see topics like:
+
+```text
+/TB3_1/scan
+/TB3_1/odom
+/TB3_1/cmd_vel
+/TB3_2/scan
+/TB3_2/odom
+/TB3_2/cmd_vel
+```
+
+Terminal 2, planner for `TB3_1`:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+
+ros2 run rrt_pathplanner rrt_pathplanner --ros-args \
+  -r __node:=rrt_TB3_1 \
+  -r /scan:=/TB3_1/scan \
+  -r /odom:=/TB3_1/odom \
+  -r /cmd_vel:=/TB3_1/cmd_vel \
+  -r /goal_marker:=/TB3_1/goal_marker \
+  -p multibot:=1 \
+  -p robot_id:=TB3_1 \
+  -p goal_x:=2.0 \
+  -p goal_y:=1.0 \
+  -p robot_radius:=0.18 \
+  -p shared_origin_x:=-2.0 \
+  -p shared_origin_y:=-0.5 \
+  -p shared_origin_yaw:=0.0
+```
+
+Terminal 3, planner for `TB3_2`:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+
+ros2 run rrt_pathplanner rrt_pathplanner --ros-args \
+  -r __node:=rrt_TB3_2 \
+  -r /scan:=/TB3_2/scan \
+  -r /odom:=/TB3_2/odom \
+  -r /cmd_vel:=/TB3_2/cmd_vel \
+  -r /goal_marker:=/TB3_2/goal_marker \
+  -p multibot:=1 \
+  -p robot_id:=TB3_2 \
+  -p goal_x:=1.0 \
+  -p goal_y:=-1.0 \
+  -p robot_radius:=0.18 \
+  -p shared_origin_x:=0.5 \
+  -p shared_origin_y:=-2.0 \
+  -p shared_origin_yaw:=0.0
+```
+
+Terminal 4, central coordinator:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+
+ros2 run rrt_pathplanner multibot_coordinator --ros-args \
+  -p robot_ids:="TB3_1,TB3_2"
+```
+
+Type `Y` in the coordinator terminal. Gazebo uses one ROS domain here, so no
+`domain_bridge` is needed for the simulation test.
+
 ## Coordination Topics
 
 Only these topics need to be shared between ROS domains:
@@ -212,8 +314,8 @@ shared_origin_y = 0.0
 shared_origin_yaw = 0.0
 
 Robot 31 starts 1.0 m to the right in the shared room frame:
-shared_origin_x = 1.0
-shared_origin_y = 0.0
+shared_origin_x = 0.0
+shared_origin_y = -1.0
 shared_origin_yaw = 0.0
 ```
 

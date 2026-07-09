@@ -147,17 +147,17 @@ MULTIBOT_CONTROL_TOPIC = "/multibot/control"
 MULTIBOT_STATE_PUBLISH_PERIOD = 0.20
 
 # Central ATP-style traffic grid. The local planner still uses GRID_RESOLUTION.
-TRAFFIC_GRID_RESOLUTION = 0.50
+TRAFFIC_GRID_RESOLUTION = 0.35
 
 # Yellow zone expands around each robot's red footprint by this many traffic cells.
-TRAFFIC_YELLOW_RADIUS_CELLS = 1
+TRAFFIC_YELLOW_RADIUS_CELLS = 0.35
 
 # Number of upcoming traffic cells checked for "about to enter red zone".
-TRAFFIC_LOOKAHEAD_CELLS = 3
+TRAFFIC_LOOKAHEAD_CELLS = 1
 
 # Minimum center-to-center robot spacing in yellow-zone checks is:
 # radius_a + radius_b + MULTIBOT_SAFETY_MARGIN.
-MULTIBOT_SAFETY_MARGIN = 0.20
+MULTIBOT_SAFETY_MARGIN = 0.10
 
 # Extra distance before releasing a robot that was stopped near another robot.
 MULTIBOT_RESUME_HYSTERESIS = 0.10
