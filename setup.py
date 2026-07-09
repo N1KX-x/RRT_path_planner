@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'rrt_pathplanner = rrt_pathplanner.main:main',
+            'rrt_pathplanner = rrt_pathplanner.main:main',
+            'multibot_coordinator = rrt_pathplanner.multibot_coordinator:main',
         ],
     },
 )

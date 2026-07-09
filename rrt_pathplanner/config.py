@@ -117,3 +117,59 @@ GOAL_TOLERANCE = 0.1
 SAVE_TRIAL_MAP = True
 TRIAL_MAP_OUTPUT_DIR = "path_planner_maps"
 TRIAL_MAP_PIXEL_SCALE = 2
+
+
+# Multi-robot coordination.
+# Keep false for normal single-robot behavior. In ROS, this can be changed with:
+# ros2 run rrt_pathplanner rrt_pathplanner --ros-args -p multibot:=1
+MULTIBOT_DEFAULT = 0
+
+# Each robot should override robot_id when multibot is enabled.
+DEFAULT_ROBOT_ID = "robot"
+
+# Approximate robot body radius used by the central traffic coordinator.
+ROBOT_RADIUS = 0.18
+
+# Transform this robot's local start frame into the shared multibot traffic frame.
+# If robot A starts at the room origin and robot B starts 1 m to its left, run
+# robot B with -p shared_origin_y:=1.0.
+MULTIBOT_SHARED_ORIGIN_X = 0.0
+MULTIBOT_SHARED_ORIGIN_Y = 0.0
+MULTIBOT_SHARED_ORIGIN_YAW = 0.0
+
+# Shared coordination topics. Bridge these topics between ROS_DOMAIN_IDs when
+# robots are isolated in different domains.
+MULTIBOT_STATE_TOPIC = "/multibot/robot_state"
+MULTIBOT_START_TOPIC = "/multibot/start"
+MULTIBOT_CONTROL_TOPIC = "/multibot/control"
+
+# How often each robot publishes its state to the coordinator.
+MULTIBOT_STATE_PUBLISH_PERIOD = 0.20
+
+# Central ATP-style traffic grid. The local planner still uses GRID_RESOLUTION.
+TRAFFIC_GRID_RESOLUTION = 0.50
+
+# Yellow zone expands around each robot's red footprint by this many traffic cells.
+TRAFFIC_YELLOW_RADIUS_CELLS = 1
+
+# Number of upcoming traffic cells checked for "about to enter red zone".
+TRAFFIC_LOOKAHEAD_CELLS = 3
+
+# Minimum center-to-center robot spacing in yellow-zone checks is:
+# radius_a + radius_b + MULTIBOT_SAFETY_MARGIN.
+MULTIBOT_SAFETY_MARGIN = 0.20
+
+# Extra distance before releasing a robot that was stopped near another robot.
+MULTIBOT_RESUME_HYSTERESIS = 0.10
+
+# Robot states older than this are ignored by the central coordinator.
+MULTIBOT_STATE_TIMEOUT = 1.50
+
+# Robot stops if central control messages stop arriving after START.
+MULTIBOT_CONTROL_TIMEOUT = 1.00
+
+# Coordinator control loop period.
+MULTIBOT_COORDINATOR_PERIOD = 0.10
+
+# Slow command cap used by the coordinator when needed.
+MULTIBOT_SLOW_LINEAR_SPEED = 0.05

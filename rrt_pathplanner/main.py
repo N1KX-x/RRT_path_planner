@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import struct
@@ -13,6 +14,7 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .occupancy_grid import OccupancyGrid
@@ -51,8 +53,28 @@ from .config import (
     RECOVERY_BACKTRACK_MAX_ANGULAR_SPEED,
     SAVE_TRIAL_MAP,
     TRIAL_MAP_OUTPUT_DIR,
-    TRIAL_MAP_PIXEL_SCALE
+    TRIAL_MAP_PIXEL_SCALE,
+    MULTIBOT_DEFAULT,
+    DEFAULT_ROBOT_ID,
+    ROBOT_RADIUS,
+    MULTIBOT_SHARED_ORIGIN_X,
+    MULTIBOT_SHARED_ORIGIN_Y,
+    MULTIBOT_SHARED_ORIGIN_YAW,
+    MULTIBOT_STATE_TOPIC,
+    MULTIBOT_START_TOPIC,
+    MULTIBOT_CONTROL_TOPIC,
+    MULTIBOT_STATE_PUBLISH_PERIOD,
+    MULTIBOT_CONTROL_TIMEOUT,
+    MULTIBOT_SLOW_LINEAR_SPEED
 )
+
+
+def parameter_to_bool(value):
+    """Convert ROS parameter values such as true, 1, or 'yes' into bool."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "y")
+
+    return bool(value)
 
 
 class InformedRRTNavigator(Node):
@@ -65,16 +87,38 @@ class InformedRRTNavigator(Node):
         # goal_x and goal_y can be overridden with ROS parameters at launch.
         self.declare_parameter("goal_x", DEFAULT_GOAL_X)
         self.declare_parameter("goal_y", DEFAULT_GOAL_Y)
+        self.declare_parameter("multibot", MULTIBOT_DEFAULT)
+        self.declare_parameter("robot_id", DEFAULT_ROBOT_ID)
+        self.declare_parameter("robot_radius", ROBOT_RADIUS)
+        self.declare_parameter("shared_origin_x", MULTIBOT_SHARED_ORIGIN_X)
+        self.declare_parameter("shared_origin_y", MULTIBOT_SHARED_ORIGIN_Y)
+        self.declare_parameter("shared_origin_yaw", MULTIBOT_SHARED_ORIGIN_YAW)
+        self.declare_parameter("obstacle_inflation_radius", OBSTACLE_INFLATION_RADIUS)
 
         self.goal_x = float(self.get_parameter("goal_x").value)
         self.goal_y = float(self.get_parameter("goal_y").value)
+        self.multibot_enabled = parameter_to_bool(self.get_parameter("multibot").value)
+        self.robot_id = str(self.get_parameter("robot_id").value)
+        self.robot_radius = float(self.get_parameter("robot_radius").value)
+        self.shared_origin_x = float(self.get_parameter("shared_origin_x").value)
+        self.shared_origin_y = float(self.get_parameter("shared_origin_y").value)
+        self.shared_origin_yaw = float(self.get_parameter("shared_origin_yaw").value)
+        self.obstacle_inflation_radius = float(
+            self.get_parameter("obstacle_inflation_radius").value
+        )
+        self.multibot_started = not self.multibot_enabled
+        self.multibot_command = "RUN"
+        self.multibot_reason = ""
+        self.multibot_speed_limit = None
+        self.last_multibot_control_time = None
+        self.last_published_cmd = Twist()
         self.active_goal_x = self.goal_x
         self.active_goal_y = self.goal_y
         self.grid = OccupancyGrid(
             width_m=MAP_WIDTH_M,
             height_m=MAP_HEIGHT_M,
             resolution=GRID_RESOLUTION,
-            inflation_radius=OBSTACLE_INFLATION_RADIUS
+            inflation_radius=self.obstacle_inflation_radius
         )
 
         self.planner = InformedRRTPlanner()
@@ -135,12 +179,51 @@ class InformedRRTNavigator(Node):
             10
         )
 
+        self.multibot_state_pub = None
+        self.multibot_start_sub = None
+        self.multibot_control_sub = None
+        self.multibot_state_timer = None
+
+        if self.multibot_enabled:
+            self.multibot_state_pub = self.create_publisher(
+                String,
+                MULTIBOT_STATE_TOPIC,
+                10
+            )
+            self.multibot_start_sub = self.create_subscription(
+                String,
+                MULTIBOT_START_TOPIC,
+                self.multibot_start_callback,
+                10
+            )
+            self.multibot_control_sub = self.create_subscription(
+                String,
+                MULTIBOT_CONTROL_TOPIC,
+                self.multibot_control_callback,
+                10
+            )
+            self.multibot_state_timer = self.create_timer(
+                MULTIBOT_STATE_PUBLISH_PERIOD,
+                self.publish_multibot_state
+            )
+
         self.timer = self.create_timer(0.1, self.control_loop)
 
         self.get_logger().info("Informed RRT* Navigator started.")
         self.get_logger().info(
             f"Target point coordinate: x={self.goal_x:.2f}, y={self.goal_y:.2f} meters"
         )
+
+        if self.multibot_enabled:
+            self.get_logger().info(
+                f"Multibot enabled for robot_id={self.robot_id}. "
+                "Waiting for central START command."
+            )
+            self.get_logger().info(
+                "Shared traffic origin: "
+                f"x={self.shared_origin_x:.2f}, y={self.shared_origin_y:.2f}, "
+                f"yaw={self.shared_origin_yaw:.2f} rad"
+            )
 
 
     def publish_goal_marker(self):
@@ -217,6 +300,212 @@ class InformedRRTNavigator(Node):
 
         self.goal_marker_pub.publish(marker_array)
 
+    def multibot_start_callback(self, msg):
+        """Receive start/stop commands from the central multibot coordinator."""
+        command = self.parse_multibot_command(msg.data).get("command", msg.data)
+        command = str(command).strip().upper()
+
+        if command in ("START", "RUN", "RESUME", "Y"):
+            if not self.multibot_started:
+                self.get_logger().info("Central START received. Navigation armed.")
+
+            self.multibot_started = True
+            self.multibot_command = "RUN"
+            self.multibot_reason = "central_start"
+            return
+
+        if command in ("STOP", "PAUSE", "HOLD"):
+            self.multibot_started = False
+            self.multibot_command = "HOLD"
+            self.multibot_reason = "central_pause"
+            self.stop_robot()
+
+    def multibot_control_callback(self, msg):
+        """Receive RUN/SLOW/HOLD/EMERGENCY_STOP commands from the coordinator."""
+        data = self.parse_multibot_command(msg.data)
+        target = str(data.get("robot_id", data.get("target", "*")))
+
+        if target not in ("*", self.robot_id):
+            return
+
+        command = str(data.get("command", "RUN")).strip().upper()
+
+        if command not in ("RUN", "SLOW", "HOLD", "EMERGENCY_STOP"):
+            return
+
+        self.multibot_command = command
+        self.multibot_reason = str(data.get("reason", ""))
+        self.last_multibot_control_time = time.monotonic()
+
+        if "speed_limit" in data:
+            self.multibot_speed_limit = float(data["speed_limit"])
+        else:
+            self.multibot_speed_limit = None
+
+    def parse_multibot_command(self, text):
+        """Parse JSON coordination messages, with plain text as a fallback."""
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return {"command": text}
+
+        if isinstance(data, dict):
+            return data
+
+        return {"command": text}
+
+    def local_point_to_shared(self, x, y):
+        """Transform a local planner point into the shared traffic frame."""
+        cos_t = math.cos(self.shared_origin_yaw)
+        sin_t = math.sin(self.shared_origin_yaw)
+        shared_x = self.shared_origin_x + x * cos_t - y * sin_t
+        shared_y = self.shared_origin_y + x * sin_t + y * cos_t
+
+        return shared_x, shared_y
+
+    def local_pose_to_shared(self, x, y, theta):
+        """Transform a local planner pose into the shared traffic frame."""
+        shared_x, shared_y = self.local_point_to_shared(x, y)
+        shared_theta = normalize_angle(theta + self.shared_origin_yaw)
+
+        return shared_x, shared_y, shared_theta
+
+    def publish_multibot_state(self):
+        """Publish this robot's current pose, path, and coordination status."""
+        if not self.multibot_enabled or self.multibot_state_pub is None:
+            return
+
+        shared_x, shared_y, shared_theta = self.local_pose_to_shared(
+            self.robot_x,
+            self.robot_y,
+            self.robot_theta
+        )
+        shared_goal_x, shared_goal_y = self.local_point_to_shared(
+            self.goal_x,
+            self.goal_y
+        )
+        shared_active_goal_x, shared_active_goal_y = self.local_point_to_shared(
+            self.active_goal_x,
+            self.active_goal_y
+        )
+        remaining_path = []
+
+        for point in self.path[self.path_index:self.path_index + 20]:
+            shared_path_x, shared_path_y = self.local_point_to_shared(
+                point[0],
+                point[1]
+            )
+            remaining_path.append({"x": shared_path_x, "y": shared_path_y})
+
+        state = {
+            "robot_id": self.robot_id,
+            "pose_ready": self.initial_pose_set,
+            "x": shared_x,
+            "y": shared_y,
+            "theta": shared_theta,
+            "local_x": self.robot_x,
+            "local_y": self.robot_y,
+            "local_theta": self.robot_theta,
+            "linear_x": self.last_published_cmd.linear.x,
+            "angular_z": self.last_published_cmd.angular.z,
+            "robot_radius": self.robot_radius,
+            "goal_x": shared_goal_x,
+            "goal_y": shared_goal_y,
+            "active_goal_x": shared_active_goal_x,
+            "active_goal_y": shared_active_goal_y,
+            "shared_origin_x": self.shared_origin_x,
+            "shared_origin_y": self.shared_origin_y,
+            "shared_origin_yaw": self.shared_origin_yaw,
+            "started": self.multibot_started,
+            "central_command": self.multibot_command,
+            "central_reason": self.multibot_reason,
+            "status": self.get_multibot_status(),
+            "path_index": self.path_index,
+            "path_length": len(self.path),
+            "path": remaining_path,
+        }
+
+        msg = String()
+        msg.data = json.dumps(state, separators=(",", ":"))
+        self.multibot_state_pub.publish(msg)
+
+    def get_multibot_status(self):
+        """Return a compact status string for the central coordinator."""
+        if not self.initial_pose_set:
+            return "WAITING_FOR_ODOM"
+
+        if self.goal_reached:
+            return "GOAL_REACHED"
+
+        if self.recovery_mode:
+            return "RECOVERY"
+
+        if self.multibot_enabled and not self.multibot_started:
+            return "WAITING_FOR_START"
+
+        if self.multibot_enabled and self.multibot_control_is_stale():
+            return "CONTROL_TIMEOUT"
+
+        if self.multibot_enabled and self.multibot_command != "RUN":
+            return self.multibot_command
+
+        if self.need_replan:
+            return "PLANNING"
+
+        return "RUNNING"
+
+    def multibot_control_is_stale(self):
+        """Return True if central control messages have timed out."""
+        if self.last_multibot_control_time is None:
+            return True
+
+        return (
+            time.monotonic() - self.last_multibot_control_time
+        ) > MULTIBOT_CONTROL_TIMEOUT
+
+    def publish_cmd(self, cmd):
+        """Publish a Twist after applying central multibot safety limits."""
+        published_cmd = self.apply_multibot_command(cmd)
+        self.cmd_pub.publish(published_cmd)
+        self.last_published_cmd = published_cmd
+        return published_cmd
+
+    def apply_multibot_command(self, cmd):
+        """Return a command limited by the central coordinator."""
+        limited_cmd = Twist()
+        limited_cmd.linear.x = cmd.linear.x
+        limited_cmd.linear.y = cmd.linear.y
+        limited_cmd.linear.z = cmd.linear.z
+        limited_cmd.angular.x = cmd.angular.x
+        limited_cmd.angular.y = cmd.angular.y
+        limited_cmd.angular.z = cmd.angular.z
+
+        if not self.multibot_enabled:
+            return limited_cmd
+
+        if not self.multibot_started:
+            return Twist()
+
+        if self.multibot_control_is_stale():
+            return Twist()
+
+        if self.multibot_command in ("HOLD", "EMERGENCY_STOP"):
+            return Twist()
+
+        if self.multibot_command == "SLOW":
+            speed_limit = self.multibot_speed_limit
+
+            if speed_limit is None:
+                speed_limit = MULTIBOT_SLOW_LINEAR_SPEED
+
+            limited_cmd.linear.x = clamp(
+                limited_cmd.linear.x,
+                -abs(speed_limit),
+                abs(speed_limit)
+            )
+
+        return limited_cmd
+
     def odom_callback(self, msg):
         """Convert odometry into the local start frame used by the planner."""
         odom_x = msg.pose.pose.position.x
@@ -282,6 +571,10 @@ class InformedRRTNavigator(Node):
         self.publish_goal_marker()
 
         if self.goal_reached:
+            self.stop_robot()
+            return
+
+        if self.multibot_enabled and not self.multibot_started:
             self.stop_robot()
             return
 
@@ -377,8 +670,8 @@ class InformedRRTNavigator(Node):
             self.enter_recovery()
             return
 
-        self.cmd_pub.publish(cmd)
-        self.record_normal_motion_tick(cmd)
+        published_cmd = self.publish_cmd(cmd)
+        self.record_normal_motion_tick(published_cmd)
 
     def enter_recovery(self):
         """Start recovery mode after the front LiDAR sector becomes unsafe."""
@@ -423,9 +716,15 @@ class InformedRRTNavigator(Node):
         target = self.get_recovery_backtrack_target()
         cmd.linear.x = self.backup_speed
         cmd.angular.z = self.compute_backtrack_angular_velocity(target)
-        self.cmd_pub.publish(cmd)
+        published_cmd = self.publish_cmd(cmd)
 
-        self.recovery_counter += 1
+        moving = (
+            abs(published_cmd.linear.x) > 1e-6
+            or abs(published_cmd.angular.z) > 1e-6
+        )
+
+        if moving:
+            self.recovery_counter += 1
 
         if self.recovery_counter >= self.backup_ticks:
             self.get_logger().info("Recovery backup finished. Replanning.")
@@ -612,8 +911,8 @@ class InformedRRTNavigator(Node):
             self.enter_recovery()
             return False
 
-        self.cmd_pub.publish(cmd)
-        self.record_normal_motion_tick(cmd)
+        published_cmd = self.publish_cmd(cmd)
+        self.record_normal_motion_tick(published_cmd)
         return True
 
     def record_normal_motion_tick(self, cmd):
@@ -941,6 +1240,7 @@ class InformedRRTNavigator(Node):
 
         cmd = Twist()
         self.cmd_pub.publish(cmd)
+        self.last_published_cmd = cmd
 
     def record_robot_trail_point(self):
         """Store the robot position occasionally for the final trial map."""
