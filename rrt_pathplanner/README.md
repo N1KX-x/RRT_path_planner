@@ -23,8 +23,10 @@ ros2 run rrt_pathplanner rrt_pathplanner --ros-args \
 
 ## Multibot Control Manual
 
-In multibot mode, each robot still runs its own local RRT planner. The central
-coordinator does not change robot routes. It only sends safety commands:
+In multibot mode, each robot still runs its own local RRT planner. Before
+starting, the coordinator sends every robot's final goal to the other robots.
+Those goals are reserved as inflated obstacles in each local map. During
+navigation, the coordinator also sends safety commands:
 
 ```text
 RUN
@@ -47,7 +49,7 @@ Build first:
 ```bash
 source /opt/ros/humble/setup.bash
 cd ~/ros2_ws
-colcon build --packages-select rrt_pathplanner
+colcon build --packages-select rrt_pathplanner --symlink-install
 source install/setup.bash
 ```
 
@@ -58,7 +60,13 @@ source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=0
 
-ros2 launch rrt_pathplanner two_waffles.launch.py
+ros2 launch rrt_pathplanner two_waffles.launch.py \
+  tb3_1_x:=0.0 \
+  tb3_1_y:=0.0 \
+  tb3_1_yaw:=0.0 \
+  tb3_2_x:=-0.5 \
+  tb3_2_y:=0.0 \
+  tb3_2_yaw:=0.0
 ```
 
 Check the simulated robot topics:
@@ -94,10 +102,11 @@ ros2 run rrt_pathplanner rrt_pathplanner --ros-args \
   -p multibot:=1 \
   -p robot_id:=TB3_1 \
   -p goal_x:=2.0 \
-  -p goal_y:=1.0 \
+  -p goal_y:=0.0 \
   -p robot_radius:=0.18 \
-  -p shared_origin_x:=-2.0 \
-  -p shared_origin_y:=-0.5 \
+  -p goal_point_inflation_radius:=0.46 \
+  -p shared_origin_x:=0.0 \
+  -p shared_origin_y:=0.0 \
   -p shared_origin_yaw:=0.0
 ```
 
@@ -116,11 +125,12 @@ ros2 run rrt_pathplanner rrt_pathplanner --ros-args \
   -r /goal_marker:=/TB3_2/goal_marker \
   -p multibot:=1 \
   -p robot_id:=TB3_2 \
-  -p goal_x:=1.0 \
-  -p goal_y:=-1.0 \
+  -p goal_x:=4.0 \
+  -p goal_y:=0.0 \
   -p robot_radius:=0.18 \
-  -p shared_origin_x:=0.5 \
-  -p shared_origin_y:=-2.0 \
+  -p goal_point_inflation_radius:=0.46 \
+  -p shared_origin_x:=-0.5 \
+  -p shared_origin_y:=0.0 \
   -p shared_origin_yaw:=0.0
 ```
 
@@ -132,11 +142,18 @@ source ~/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=0
 
 ros2 run rrt_pathplanner multibot_coordinator --ros-args \
-  -p robot_ids:="TB3_1,TB3_2"
+  -p robot_ids:="TB3_1,TB3_2" \
+  -p safety_margin:=0.10
 ```
 
-Type `Y` in the coordinator terminal. Gazebo uses one ROS domain here, so no
-`domain_bridge` is needed for the simulation test.
+Wait until the coordinator prints:
+
+```text
+Initial Setup is Ready, Goal Point Marked, Press Y to Run
+```
+
+Then type `Y`. Gazebo uses one ROS domain here, so no `domain_bridge` is needed
+for the simulation test.
 
 ## Coordination Topics
 
