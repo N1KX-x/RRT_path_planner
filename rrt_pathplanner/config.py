@@ -41,6 +41,10 @@ RRT_SHORTCUT_ATTEMPTS = 120
 # Extra safety space around each obstacle. Increase this if the robot gets too close.
 OBSTACLE_INFLATION_RADIUS = 0.16
 
+# Safety radius used when another robot's final goal is reserved in this
+# robot's local occupancy map before multibot navigation starts.
+GOAL_POINT_INFLATION_RADIUS = 0.25
+
 # LiDAR readings farther than this are ignored for obstacle marking.
 MAX_LIDAR_OBSTACLE_RANGE = 3.0
 
@@ -85,6 +89,9 @@ RECOVERY_REAR_CLEAR_DISTANCE = 0.1
 # Negative speed means backing up.
 RECOVERY_BACKUP_SPEED = -0.10
 
+# Maximum recovery duration. During initial startup only, recovery is shortened
+# to the number of normal movement ticks accumulated so far. After the robot has
+# moved for this many ticks, every recovery uses this fixed duration.
 # Timer ticks are based on the 0.1 second control loop.
 RECOVERY_BACKUP_TICKS = 20
 

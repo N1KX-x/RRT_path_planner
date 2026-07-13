@@ -29,6 +29,7 @@ from .config import (
     MAP_HEIGHT_M,
     GRID_RESOLUTION,
     OBSTACLE_INFLATION_RADIUS,
+    GOAL_POINT_INFLATION_RADIUS,
     FRONT_OBSTACLE_STOP_DISTANCE,
     FRONT_HARD_STOP_ANGLE_DEG,
     RECOVERY_FORWARD_SPEED_TRIGGER,
@@ -65,7 +66,8 @@ from .config import (
     MULTIBOT_CONTROL_TOPIC,
     MULTIBOT_STATE_PUBLISH_PERIOD,
     MULTIBOT_CONTROL_TIMEOUT,
-    MULTIBOT_SLOW_LINEAR_SPEED
+    MULTIBOT_SLOW_LINEAR_SPEED,
+    MULTIBOT_SAFETY_MARGIN
 )
 
 
@@ -94,6 +96,10 @@ class InformedRRTNavigator(Node):
         self.declare_parameter("shared_origin_y", MULTIBOT_SHARED_ORIGIN_Y)
         self.declare_parameter("shared_origin_yaw", MULTIBOT_SHARED_ORIGIN_YAW)
         self.declare_parameter("obstacle_inflation_radius", OBSTACLE_INFLATION_RADIUS)
+        self.declare_parameter(
+            "goal_point_inflation_radius",
+            GOAL_POINT_INFLATION_RADIUS
+        )
 
         self.goal_x = float(self.get_parameter("goal_x").value)
         self.goal_y = float(self.get_parameter("goal_y").value)
@@ -106,12 +112,18 @@ class InformedRRTNavigator(Node):
         self.obstacle_inflation_radius = float(
             self.get_parameter("obstacle_inflation_radius").value
         )
+        self.goal_point_inflation_radius = float(
+            self.get_parameter("goal_point_inflation_radius").value
+        )
         self.multibot_started = not self.multibot_enabled
         self.multibot_command = "RUN"
         self.multibot_reason = ""
         self.multibot_speed_limit = None
         self.last_multibot_control_time = None
         self.last_published_cmd = Twist()
+        self.goal_setup_ready = not self.multibot_enabled
+        self.goal_setup_id = ""
+        self.other_robot_goal_points = {}
         self.active_goal_x = self.goal_x
         self.active_goal_y = self.goal_y
         self.grid = OccupancyGrid(
@@ -148,7 +160,7 @@ class InformedRRTNavigator(Node):
         self.recovery_counter = 0
         self.recovery_trail = []
         self.recovery_trail_index = 0
-        self.normal_motion_ticks_since_recovery = 0
+        self.normal_motion_ticks_since_start = 0
 
         self.backup_ticks = RECOVERY_BACKUP_TICKS
         self.backup_speed = RECOVERY_BACKUP_SPEED
@@ -330,6 +342,10 @@ class InformedRRTNavigator(Node):
 
         command = str(data.get("command", "RUN")).strip().upper()
 
+        if command == "SETUP_GOALS":
+            self.apply_multibot_goal_setup(data)
+            return
+
         if command not in ("RUN", "SLOW", "HOLD", "EMERGENCY_STOP"):
             return
 
@@ -369,6 +385,107 @@ class InformedRRTNavigator(Node):
         shared_theta = normalize_angle(theta + self.shared_origin_yaw)
 
         return shared_x, shared_y, shared_theta
+
+    def shared_point_to_local(self, x, y):
+        """Transform a shared multibot point into this robot's local map frame."""
+        dx = x - self.shared_origin_x
+        dy = y - self.shared_origin_y
+        cos_t = math.cos(self.shared_origin_yaw)
+        sin_t = math.sin(self.shared_origin_yaw)
+
+        local_x = dx * cos_t + dy * sin_t
+        local_y = -dx * sin_t + dy * cos_t
+        return local_x, local_y
+
+    def apply_multibot_goal_setup(self, data):
+        """Reserve every other robot's final goal in this robot's local map."""
+        setup_id = str(data.get("setup_id", ""))
+        raw_goals = data.get("goals", [])
+
+        if not setup_id or not isinstance(raw_goals, list):
+            self.goal_setup_ready = False
+            return
+
+        try:
+            safety_margin = max(
+                0.0,
+                float(data.get("safety_margin", MULTIBOT_SAFETY_MARGIN))
+            )
+        except (TypeError, ValueError):
+            self.goal_setup_ready = False
+            return
+
+        if self.goal_setup_ready and setup_id == self.goal_setup_id:
+            self.mark_other_robot_goals()
+            return
+
+        transformed_goals = {}
+
+        for goal in raw_goals:
+            if not isinstance(goal, dict):
+                continue
+
+            other_robot_id = str(goal.get("robot_id", "")).strip()
+            if not other_robot_id or other_robot_id == self.robot_id:
+                continue
+
+            try:
+                shared_x = float(goal["x"])
+                shared_y = float(goal["y"])
+                other_robot_radius = max(
+                    0.0,
+                    float(goal.get("robot_radius", ROBOT_RADIUS))
+                )
+            except (KeyError, TypeError, ValueError):
+                self.goal_setup_ready = False
+                return
+
+            local_x, local_y = self.shared_point_to_local(shared_x, shared_y)
+            cell = self.grid.world_to_grid(local_x, local_y)
+
+            if cell is None:
+                self.get_logger().error(
+                    f"Cannot mark {other_robot_id} goal: local point "
+                    f"({local_x:.2f}, {local_y:.2f}) is outside this robot's map."
+                )
+                self.goal_setup_ready = False
+                return
+
+            effective_radius = max(
+                self.goal_point_inflation_radius,
+                self.robot_radius + other_robot_radius + safety_margin
+            )
+            transformed_goals[other_robot_id] = (
+                local_x,
+                local_y,
+                effective_radius
+            )
+
+        self.other_robot_goal_points = transformed_goals
+        self.mark_other_robot_goals()
+        self.goal_setup_id = setup_id
+        self.goal_setup_ready = True
+        self.need_replan = True
+        self.replan_straight_mode = False
+
+        marked_ids = ", ".join(sorted(transformed_goals)) or "none"
+        self.get_logger().info(
+            f"Multibot goal setup ready. Marked goal obstacles for: {marked_ids}."
+        )
+
+    def mark_other_robot_goals(self):
+        """Reapply reserved final goals so LiDAR ray clearing cannot erase them."""
+        for (
+            local_x,
+            local_y,
+            effective_radius
+        ) in self.other_robot_goal_points.values():
+            cell = self.grid.world_to_grid(local_x, local_y)
+            if cell is not None:
+                self.grid.inflate_obstacle(
+                    cell,
+                    inflation_radius=effective_radius
+                )
 
     def publish_multibot_state(self):
         """Publish this robot's current pose, path, and coordination status."""
@@ -419,6 +536,8 @@ class InformedRRTNavigator(Node):
             "started": self.multibot_started,
             "central_command": self.multibot_command,
             "central_reason": self.multibot_reason,
+            "goal_setup_ready": self.goal_setup_ready,
+            "goal_setup_id": self.goal_setup_id,
             "status": self.get_multibot_status(),
             "path_index": self.path_index,
             "path_length": len(self.path),
@@ -549,6 +668,7 @@ class InformedRRTNavigator(Node):
             robot_y=self.robot_y,
             robot_theta=self.robot_theta
         )
+        self.mark_other_robot_goals()
 
         if (
             not self.recovery_mode
@@ -682,7 +802,7 @@ class InformedRRTNavigator(Node):
         self.recovery_counter = 0
         self.backup_ticks = min(
             RECOVERY_BACKUP_TICKS,
-            self.normal_motion_ticks_since_recovery
+            self.normal_motion_ticks_since_start
         )
         self.need_replan = True
         self.replan_straight_mode = False
@@ -777,7 +897,6 @@ class InformedRRTNavigator(Node):
         self.recovery_counter = 0
         self.recovery_trail = []
         self.recovery_trail_index = 0
-        self.normal_motion_ticks_since_recovery = 0
         self.path = []
         self.path_index = 0
         self.need_replan = True
@@ -916,9 +1035,9 @@ class InformedRRTNavigator(Node):
         return True
 
     def record_normal_motion_tick(self, cmd):
-        """Count non-recovery movement commands for recovery backup duration."""
+        """Count normal movement since startup for early recovery duration."""
         if abs(cmd.linear.x) > 1e-6 or abs(cmd.angular.z) > 1e-6:
-            self.normal_motion_ticks_since_recovery += 1
+            self.normal_motion_ticks_since_start += 1
 
     def clear_cell_radius(self, center_cell, radius_cells=3):
         """Clear a small circle in the grid so the robot can plan from its own cell."""

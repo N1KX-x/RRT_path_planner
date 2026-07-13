@@ -53,6 +53,8 @@ class RobotTrafficState:
     started: bool = False
     status: str = "UNKNOWN"
     path: list = field(default_factory=list)
+    goal_setup_ready: bool = False
+    goal_setup_id: str = ""
     last_seen: float = 0.0
 
 
@@ -60,8 +62,9 @@ class MultibotCoordinator(Node):
     """
     Central ATP-style traffic supervisor for multiple TurtleBots.
 
-    This node does not change local RRT routes. It only publishes RUN, HOLD,
-    SLOW, or EMERGENCY_STOP commands based on coarse traffic-cell occupancy.
+    Before START, this node distributes all robot goals so each local RRT map
+    can reserve the other robots' endpoints. During motion, it publishes RUN,
+    HOLD, SLOW, or EMERGENCY_STOP commands for live traffic conflicts.
     """
 
     def __init__(self):
@@ -109,6 +112,9 @@ class MultibotCoordinator(Node):
         self.last_commands = {}
         self.hold_since = {}
         self.start_requested = False
+        self.setup_ready = False
+        self.setup_id = ""
+        self.setup_ready_event = threading.Event()
         self.last_status_log = 0.0
 
         self.state_sub = self.create_subscription(
@@ -154,9 +160,13 @@ class MultibotCoordinator(Node):
 
     def prompt_for_start(self):
         """Wait for the operator's command-line confirmation."""
+        self.setup_ready_event.wait()
+
+        if not rclpy.ok():
+            return
+
         print("")
-        print("Multibot coordinator is running.")
-        print("Type Y and press Enter to start all ready robots.")
+        print("Initial Setup is Ready, Goal Point Marked, Press Y to Run")
 
         while rclpy.ok():
             try:
@@ -173,7 +183,7 @@ class MultibotCoordinator(Node):
                 print("No START sent. Shut down with Ctrl+C when ready.")
                 return
 
-            print("Type Y to start, or Ctrl+C to exit.")
+            print("Press Y to run, or Ctrl+C to exit.")
 
     def robot_state_callback(self, msg):
         """Read one robot state JSON message."""
@@ -221,6 +231,8 @@ class MultibotCoordinator(Node):
         state.started = bool(data.get("started", False))
         state.status = str(data.get("status", "UNKNOWN"))
         state.path = self.parse_path(data.get("path", []))
+        state.goal_setup_ready = bool(data.get("goal_setup_ready", False))
+        state.goal_setup_id = str(data.get("goal_setup_id", ""))
         state.last_seen = time.monotonic()
 
         self.robot_states[robot_id] = state
@@ -255,6 +267,9 @@ class MultibotCoordinator(Node):
         now = time.monotonic()
         active_states = self.get_active_states(now)
 
+        if not self.start_requested:
+            self.update_initial_goal_setup(active_states)
+
         if self.start_requested:
             self.publish_start()
 
@@ -271,6 +286,55 @@ class MultibotCoordinator(Node):
 
         self.publish_commands(commands, now)
         self.log_status(active_states, commands, now)
+
+    def update_initial_goal_setup(self, states):
+        """Send all final goals to each robot and wait for matching acknowledgements."""
+        expected_ids = self.robot_filter or set(states)
+
+        if len(expected_ids) < 2 or not expected_ids.issubset(states):
+            return
+
+        goals = [
+            {
+                "robot_id": robot_id,
+                "x": states[robot_id].goal_x,
+                "y": states[robot_id].goal_y,
+                "robot_radius": states[robot_id].robot_radius,
+            }
+            for robot_id in sorted(expected_ids)
+        ]
+        setup = {
+            "goals": goals,
+            "safety_margin": self.safety_margin,
+        }
+        setup_id = json.dumps(setup, sort_keys=True, separators=(",", ":"))
+
+        if setup_id != self.setup_id:
+            self.setup_id = setup_id
+            self.setup_ready = False
+            self.setup_ready_event.clear()
+
+        for robot_id in sorted(expected_ids):
+            payload = {
+                "command": "SETUP_GOALS",
+                "robot_id": robot_id,
+                "setup_id": self.setup_id,
+                "goals": goals,
+                "safety_margin": self.safety_margin,
+            }
+            msg = String()
+            msg.data = json.dumps(payload, separators=(",", ":"))
+            self.control_pub.publish(msg)
+
+        all_ready = all(
+            states[robot_id].goal_setup_ready
+            and states[robot_id].goal_setup_id == self.setup_id
+            for robot_id in expected_ids
+        )
+
+        if all_ready and not self.setup_ready:
+            self.setup_ready = True
+            self.setup_ready_event.set()
 
     def get_active_states(self, now):
         """Return pose-ready states that have not timed out."""

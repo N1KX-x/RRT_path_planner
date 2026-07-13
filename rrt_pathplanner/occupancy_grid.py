@@ -81,10 +81,11 @@ class OccupancyGrid:
         if cell is not None:
             self.inflate_obstacle(cell)
 
-    def inflate_obstacle(self, center_cell):
+    def inflate_obstacle(self, center_cell, inflation_radius=None):
         """Mark an obstacle plus a safety radius around it."""
         center_row, center_col = center_cell
-        inflation_cells = int(math.ceil(self.inflation_radius / self.resolution))
+        radius = self.inflation_radius if inflation_radius is None else inflation_radius
+        inflation_cells = int(math.ceil(radius / self.resolution))
 
         # Mark nearby cells too, so the planner leaves room for the robot body.
         for dr in range(-inflation_cells, inflation_cells + 1):
@@ -100,7 +101,7 @@ class OccupancyGrid:
 
                 distance = math.sqrt(dr ** 2 + dc ** 2) * self.resolution
 
-                if distance <= self.inflation_radius:
+                if distance <= radius:
                     self.grid[row][col] = 1
 
     def clear_ray(self, robot_x, robot_y, angle, distance, leave_end_cells=2):
