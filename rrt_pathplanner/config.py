@@ -49,7 +49,7 @@ GOAL_POINT_INFLATION_RADIUS = 0.25
 MAX_LIDAR_OBSTACLE_RANGE = 3.0
 
 # If an obstacle is closer than this in front, the robot enters recovery.
-FRONT_OBSTACLE_STOP_DISTANCE = 0.22
+FRONT_OBSTACLE_STOP_DISTANCE = 0.3
 
 # Narrow straight-ahead danger zone. Obstacles here are treated as true front
 # blockers even if the wider front cone also includes side-wall readings.
@@ -160,14 +160,14 @@ TRAFFIC_GRID_RESOLUTION = 0.35
 TRAFFIC_YELLOW_RADIUS_CELLS = 0.35
 
 # Number of upcoming traffic cells checked for "about to enter red zone".
-TRAFFIC_LOOKAHEAD_CELLS = 1
+TRAFFIC_LOOKAHEAD_CELLS = 2
 
 # Minimum center-to-center robot spacing in yellow-zone checks is:
 # radius_a + radius_b + MULTIBOT_SAFETY_MARGIN.
-MULTIBOT_SAFETY_MARGIN = 0.10
+MULTIBOT_SAFETY_MARGIN = 0.15
 
 # Extra distance before releasing a robot that was stopped near another robot.
-MULTIBOT_RESUME_HYSTERESIS = 0.10
+MULTIBOT_RESUME_HYSTERESIS = 0.15
 
 # Robot states older than this are ignored by the central coordinator.
 MULTIBOT_STATE_TIMEOUT = 1.50

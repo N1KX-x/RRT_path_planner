@@ -419,6 +419,21 @@ class MultibotCoordinator(Node):
         a_enters_b_red = future_cells[robot_a_id] & red_cells[robot_b_id]
         b_enters_a_red = future_cells[robot_b_id] & red_cells[robot_a_id]
 
+        # A one-way red-cell conflict has an inherent right of way: the robot
+        # that already occupies the cell must be allowed to clear it.  Do not
+        # let fairness reverse this ordering after the approaching robot has
+        # waited for a few seconds, otherwise the approaching robot remains
+        # held by this rule while a later rule also holds the leading robot.
+        pair_winner_id = None
+        pair_loser_id = None
+
+        if a_enters_b_red and not b_enters_a_red:
+            pair_winner_id = robot_b_id
+            pair_loser_id = robot_a_id
+        elif b_enters_a_red and not a_enters_b_red:
+            pair_winner_id = robot_a_id
+            pair_loser_id = robot_b_id
+
         if a_enters_b_red and b_enters_a_red:
             winner_id = self.choose_priority(state_a, state_b, now)
             loser_id = robot_b_id if winner_id == robot_a_id else robot_a_id
@@ -449,8 +464,14 @@ class MultibotCoordinator(Node):
         future_overlap = future_cells[robot_a_id] & future_cells[robot_b_id]
 
         if future_overlap:
-            winner_id = self.choose_priority(state_a, state_b, now)
-            loser_id = robot_b_id if winner_id == robot_a_id else robot_a_id
+            winner_id = pair_winner_id or self.choose_priority(
+                state_a,
+                state_b,
+                now
+            )
+            loser_id = pair_loser_id or (
+                robot_b_id if winner_id == robot_a_id else robot_a_id
+            )
             self.raise_command(
                 commands,
                 loser_id,
@@ -487,8 +508,14 @@ class MultibotCoordinator(Node):
         if not conflict:
             return
 
-        winner_id = self.choose_priority(state_a, state_b, now)
-        loser_id = robot_b_id if winner_id == robot_a_id else robot_a_id
+        winner_id = pair_winner_id or self.choose_priority(
+            state_a,
+            state_b,
+            now
+        )
+        loser_id = pair_loser_id or (
+            robot_b_id if winner_id == robot_a_id else robot_a_id
+        )
         self.raise_command(
             commands,
             loser_id,
