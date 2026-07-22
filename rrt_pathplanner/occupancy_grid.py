@@ -176,3 +176,42 @@ class OccupancyGrid:
 
         for obstacle_x, obstacle_y in obstacle_points:
             self.mark_obstacle_world(obstacle_x, obstacle_y)
+
+    def lidar_hit_pixels_in_sector(
+        self,
+        scan_msg,
+        robot_x,
+        robot_y,
+        robot_theta,
+        max_distance,
+        half_angle,
+        pixel_resolution
+    ):
+        """Rasterize current LiDAR hits in a fixed-world angular sector."""
+        hit_pixels = set()
+        scan_angle = scan_msg.angle_min
+
+        for raw_range in scan_msg.ranges:
+            relative_angle = math.atan2(
+                math.sin(scan_angle),
+                math.cos(scan_angle)
+            )
+
+            if (
+                abs(relative_angle) <= half_angle
+                and not math.isinf(raw_range)
+                and not math.isnan(raw_range)
+            ):
+                distance = lidar_range_to_meters(raw_range)
+
+                if 0.0 < distance <= max_distance:
+                    world_angle = robot_theta + scan_angle
+                    hit_x = robot_x + distance * math.cos(world_angle)
+                    hit_y = robot_y + distance * math.sin(world_angle)
+                    pixel_col = int(round(hit_x / pixel_resolution))
+                    pixel_row = int(round(hit_y / pixel_resolution))
+                    hit_pixels.add((pixel_row, pixel_col))
+
+            scan_angle += scan_msg.angle_increment
+
+        return hit_pixels

@@ -78,6 +78,18 @@ PATH_REPLAN_COOLDOWN_SCANS = 15
 # instead of stopping or following the blocked path.
 REPLAN_STRAIGHT_SPEED = 0.08
 
+# Dynamic-obstacle detection compares consecutive LiDAR hit pixels in the
+# front 180-degree hemisphere. A detection slows the robot and requests a new
+# path; the hold time prevents one quiet/noisy scan from releasing the limit.
+DYNAMIC_OBSTACLE_DETECTION_RANGE = 1.5
+DYNAMIC_OBSTACLE_CHANGED_CELL_THRESHOLD = 25
+DYNAMIC_OBSTACLE_DETECTION_HALF_ANGLE = 1.5707963267948966
+# Use a finer raster than the 0.1 m planning grid so the 25-pixel motion
+# threshold retains useful spatial detail.
+DYNAMIC_OBSTACLE_PIXEL_RESOLUTION = 0.02
+DYNAMIC_OBSTACLE_SLOW_SPEED = 0.05
+DYNAMIC_OBSTACLE_HOLD_SCANS = 10
+
 # Half-angle of the front danger zone, in radians.
 # 0.785 rad is 45 degrees on each side, 90 degrees total.
 FRONT_DETECTION_ANGLE = 0.785

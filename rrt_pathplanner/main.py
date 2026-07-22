@@ -43,6 +43,12 @@ from .config import (
     PATH_REPLAN_COOLDOWN_SCANS,
     PATH_REPLAN_LOOKAHEAD_DISTANCE,
     REPLAN_STRAIGHT_SPEED,
+    DYNAMIC_OBSTACLE_DETECTION_RANGE,
+    DYNAMIC_OBSTACLE_CHANGED_CELL_THRESHOLD,
+    DYNAMIC_OBSTACLE_DETECTION_HALF_ANGLE,
+    DYNAMIC_OBSTACLE_PIXEL_RESOLUTION,
+    DYNAMIC_OBSTACLE_SLOW_SPEED,
+    DYNAMIC_OBSTACLE_HOLD_SCANS,
     FRONT_DETECTION_ANGLE,
     PATH_DOWNSAMPLE_STEP,
     GOAL_TOLERANCE,
@@ -153,6 +159,8 @@ class InformedRRTNavigator(Node):
         self.need_replan = True
         self.replan_straight_mode = False
         self.path_replan_cooldown = 0
+        self.previous_dynamic_obstacle_pixels = None
+        self.dynamic_obstacle_hold_scans = 0
         self.adjusted_goal_cell = None
         self.goal_reached = False
         self.shutdown_requested = False
@@ -585,6 +593,14 @@ class InformedRRTNavigator(Node):
     def publish_cmd(self, cmd):
         """Publish a Twist after applying central multibot safety limits."""
         published_cmd = self.apply_multibot_command(cmd)
+
+        if self.dynamic_obstacle_hold_scans > 0:
+            published_cmd.linear.x = clamp(
+                published_cmd.linear.x,
+                -DYNAMIC_OBSTACLE_SLOW_SPEED,
+                DYNAMIC_OBSTACLE_SLOW_SPEED
+            )
+
         self.cmd_pub.publish(published_cmd)
         self.last_published_cmd = published_cmd
         return published_cmd
@@ -662,6 +678,19 @@ class InformedRRTNavigator(Node):
         if self.path_replan_cooldown > 0:
             self.path_replan_cooldown -= 1
 
+        if self.dynamic_obstacle_hold_scans > 0:
+            self.dynamic_obstacle_hold_scans -= 1
+
+        current_dynamic_obstacle_pixels = self.grid.lidar_hit_pixels_in_sector(
+            scan_msg=msg,
+            robot_x=self.robot_x,
+            robot_y=self.robot_y,
+            robot_theta=self.robot_theta,
+            max_distance=DYNAMIC_OBSTACLE_DETECTION_RANGE,
+            half_angle=DYNAMIC_OBSTACLE_DETECTION_HALF_ANGLE,
+            pixel_resolution=DYNAMIC_OBSTACLE_PIXEL_RESOLUTION
+        )
+
         self.grid.update_from_lidar(
             scan_msg=msg,
             robot_x=self.robot_x,
@@ -669,6 +698,36 @@ class InformedRRTNavigator(Node):
             robot_theta=self.robot_theta
         )
         self.mark_other_robot_goals()
+
+        if self.previous_dynamic_obstacle_pixels is None:
+            # Building the map for the first time is not obstacle motion.
+            changed_cell_count = 0
+        else:
+            changed_cell_count = len(
+                self.previous_dynamic_obstacle_pixels.symmetric_difference(
+                    current_dynamic_obstacle_pixels
+                )
+            )
+
+        self.previous_dynamic_obstacle_pixels = current_dynamic_obstacle_pixels
+
+        if changed_cell_count >= DYNAMIC_OBSTACLE_CHANGED_CELL_THRESHOLD:
+            self.dynamic_obstacle_hold_scans = DYNAMIC_OBSTACLE_HOLD_SCANS
+
+            if (
+                not self.recovery_mode
+                and not self.need_replan
+                and self.path_replan_cooldown == 0
+            ):
+                self.get_logger().warn(
+                    "Dynamic obstacle detected in front hemisphere: "
+                    f"{changed_cell_count} map cells changed within "
+                    f"{DYNAMIC_OBSTACLE_DETECTION_RANGE:.2f} m. "
+                    "Slowing down and replanning."
+                )
+                self.need_replan = True
+                self.replan_straight_mode = True
+                self.path_replan_cooldown = PATH_REPLAN_COOLDOWN_SCANS
 
         if (
             not self.recovery_mode
