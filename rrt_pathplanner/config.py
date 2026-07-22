@@ -49,7 +49,7 @@ GOAL_POINT_INFLATION_RADIUS = 0.25
 MAX_LIDAR_OBSTACLE_RANGE = 3.0
 
 # If an obstacle is closer than this in front, the robot enters recovery.
-FRONT_OBSTACLE_STOP_DISTANCE = 0.3
+FRONT_OBSTACLE_STOP_DISTANCE = 0.22
 
 # Narrow straight-ahead danger zone. Obstacles here are treated as true front
 # blockers even if the wider front cone also includes side-wall readings.
